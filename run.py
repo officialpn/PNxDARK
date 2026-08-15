@@ -1,5 +1,5 @@
 """
-NEXUS VPS PANEL - ULTRA PREMIUM EDITION (STABLE)
+NEXUS VPS PANEL - ULTRA PREMIUM EDITION
 Complete Flask Application with Persistent Storage
 Owner: PR4MOD_H4X
 """
@@ -11,8 +11,6 @@ import shutil
 import subprocess
 import threading
 import secrets
-import signal
-import sys
 from collections import deque
 from pathlib import Path
 from functools import wraps
@@ -33,17 +31,16 @@ DATA_DIR = APP_DIR / "data"
 USERS_FILE = DATA_DIR / "users.json"
 PRICING_FILE = DATA_DIR / "pricing.json"
 FILES_ROOT = APP_DIR / "user_files"
-PROCESS_STATE_FILE = DATA_DIR / "process_state.json"
 
 for d in [DATA_DIR, FILES_ROOT]:
     d.mkdir(exist_ok=True)
 
 OWNER_USER = "PRAMOD"
-OWNER_PASS = "2009"
+OWNER_PASS = "7722"
 
 DEFAULT_PRICING = {
     "currency": "₹",
-    "contact": "TELEGRAM: @PR4MOD_DM_bot",
+    "contact": "TELEGRAM: @PR4MOD_H4X",
     "plans": [
         {"name": "STARTER", "duration": "24 HOURS", "price": "49", "features": "1 FILE RUN, 512MB RAM"},
         {"name": "BASIC", "duration": "7 DAYS", "price": "199", "features": "MULTI-FILE UPLOAD, PIP/NPM"},
@@ -55,7 +52,6 @@ DEFAULT_PRICING = {
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
-app.config["PERMANENT_SESSION_LIFETIME"] = 86400 * 30
 
 # ============================================
 #  FILTERS
@@ -103,20 +99,6 @@ def save_pricing(pricing):
         with open(PRICING_FILE, 'w') as f:
             json.dump(pricing, f, indent=2)
 
-def load_process_state():
-    if not PROCESS_STATE_FILE.exists():
-        return {}
-    try:
-        with open(PROCESS_STATE_FILE, 'r') as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def save_process_state(state):
-    with _lock:
-        with open(PROCESS_STATE_FILE, 'w') as f:
-            json.dump(state, f, indent=2)
-
 def user_dir(username):
     d = FILES_ROOT / username
     d.mkdir(parents=True, exist_ok=True)
@@ -150,35 +132,20 @@ def require_user(f):
             session.clear()
             return redirect(url_for("login"))
         if users[username].get("expires_at") and time.time() > users[username]["expires_at"]:
+            del users[username]
+            save_users(users)
             session.clear()
             return redirect(url_for("login"))
         return f(*args, **kwargs)
     return wrapper
 
 # ============================================
-#  PROCESS MANAGER (IMPROVED)
+#  PROCESS MANAGER
 # ============================================
 PROCS = {}
-PROCESS_MONITOR_THREAD = None
-
-def save_process_state_for_user(username, filename):
-    state = load_process_state()
-    state[username] = {
-        "file": filename,
-        "started_at": time.time(),
-        "last_seen": time.time()
-    }
-    save_process_state(state)
-
-def clear_process_state_for_user(username):
-    state = load_process_state()
-    if username in state:
-        del state[username]
-        save_process_state(state)
 
 def start_process(username, filename):
     stop_process(username)
-    
     udir = user_dir(username)
     fpath = udir / filename
     if not fpath.exists():
@@ -198,45 +165,27 @@ def start_process(username, filename):
         proc = subprocess.Popen(
             cmd, cwd=str(udir),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            bufsize=1,
-            preexec_fn=os.setsid if os.name != 'nt' else None
+            bufsize=1
         )
     except FileNotFoundError:
         return False, "RUNTIME NOT INSTALLED"
-    except Exception as e:
-        return False, f"ERROR: {str(e)}"
     
     logs = deque(maxlen=2000)
-    logs.append(f"[START] {' '.join(cmd)} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    PROCS[username] = {"proc": proc, "logs": logs, "file": filename, "started": time.time()}
-    
-    save_process_state_for_user(username, filename)
+    logs.append(f"[START] {' '.join(cmd)}")
+    PROCS[username] = {"proc": proc, "logs": logs, "file": filename}
     
     def reader():
         try:
-            while True:
-                if proc.poll() is not None:
-                    break
+            for line in iter(proc.stdout.readline, b""):
                 try:
-                    line = proc.stdout.readline()
-                    if not line:
-                        break
-                    try:
-                        txt = line.decode("utf-8", errors="replace").rstrip()
-                    except:
-                        txt = str(line)
-                    logs.append(f"[{time.strftime('%H:%M:%S')}] {txt}")
-                except Exception as e:
-                    logs.append(f"[ERROR] {e}")
-                    break
+                    txt = line.decode("utf-8", errors="replace").rstrip()
+                except:
+                    txt = str(line)
+                logs.append(f"[{time.strftime('%H:%M:%S')}] {txt}")
         except Exception as e:
-            logs.append(f"[FATAL] {e}")
+            logs.append(f"[ERROR] {e}")
         finally:
-            code = proc.poll()
-            logs.append(f"[EXIT] PROCESS ENDED WITH CODE {code} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
-            if username in PROCS:
-                PROCS.pop(username, None)
-            clear_process_state_for_user(username)
+            logs.append(f"[EXIT] PROCESS ENDED WITH CODE {proc.poll()}")
     
     threading.Thread(target=reader, daemon=True).start()
     return True, "STARTED"
@@ -244,91 +193,27 @@ def start_process(username, filename):
 def stop_process(username):
     info = PROCS.get(username)
     if not info:
-        state = load_process_state()
-        if username in state:
-            clear_process_state_for_user(username)
         return False
-    
     proc = info["proc"]
     if proc.poll() is None:
         try:
-            if os.name != 'nt':
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            else:
-                proc.terminate()
+            proc.terminate()
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                if os.name != 'nt':
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                else:
-                    proc.kill()
-                proc.wait()
-        except Exception as e:
-            info["logs"].append(f"[STOP-ERROR] {e}")
-            try:
                 proc.kill()
-            except:
-                pass
+        except:
+            pass
         info["logs"].append("[STOP] PROCESS TERMINATED")
-    
-    PROCS.pop(username, None)
-    clear_process_state_for_user(username)
     return True
 
 def is_running(username):
     info = PROCS.get(username)
-    if info:
-        return info["proc"].poll() is None
-    state = load_process_state()
-    if username in state:
-        clear_process_state_for_user(username)
-    return False
+    return bool(info and info["proc"].poll() is None)
 
 def get_logs(username):
     info = PROCS.get(username)
-    if info:
-        return list(info["logs"])
-    return []
-
-def get_running_file(username):
-    info = PROCS.get(username)
-    if info:
-        return info.get("file")
-    state = load_process_state()
-    if username in state:
-        return state[username].get("file")
-    return None
-
-# ============================================
-#  PROCESS MONITOR
-# ============================================
-def process_monitor():
-    while True:
-        try:
-            time.sleep(30)
-            state = load_process_state()
-            
-            for username, info in state.items():
-                if username not in PROCS:
-                    filename = info.get("file")
-                    if filename:
-                        users = load_users()
-                        if username in users:
-                            expires_at = users[username].get("expires_at")
-                            if not expires_at or time.time() < expires_at:
-                                app.logger.info(f"Auto-restarting process for {username}: {filename}")
-                                start_process(username, filename)
-                                
-        except Exception as e:
-            app.logger.error(f"Monitor error: {e}")
-            continue
-
-def start_monitor():
-    global PROCESS_MONITOR_THREAD
-    if PROCESS_MONITOR_THREAD is None or not PROCESS_MONITOR_THREAD.is_alive():
-        PROCESS_MONITOR_THREAD = threading.Thread(target=process_monitor, daemon=True)
-        PROCESS_MONITOR_THREAD.start()
+    return list(info["logs"]) if info else []
 
 # ============================================
 #  INSTALL MODULE
@@ -343,18 +228,17 @@ def run_install(username, command):
         return False, "ONLY 'PIP INSTALL' OR 'NPM INSTALL' ALLOWED"
     if len(parts) < 3 or parts[1] != "install":
         return False, "FORMAT: PIP INSTALL <MODULE> OR NPM INSTALL <MODULE>"
-    if any(c in command for c in [";", "&", "|", "`", "$(", ">", "<"]):
+    if any(c in command for c in [";", "&", "|", "`", "$(", ">"]):
         return False, "INVALID CHARACTERS"
     
     logs = INSTALL_LOGS.setdefault(username, deque(maxlen=1000))
-    logs.append(f"[INSTALL] $ {command} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    logs.append(f"[INSTALL] $ {command}")
     cwd = str(user_dir(username))
     
     def worker():
         try:
             proc = subprocess.Popen(parts, cwd=cwd,
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   bufsize=1)
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             for line in iter(proc.stdout.readline, b""):
                 try:
                     txt = line.decode("utf-8", errors="replace").rstrip()
@@ -362,7 +246,7 @@ def run_install(username, command):
                     txt = str(line)
                 logs.append(txt)
             proc.wait()
-            logs.append(f"[INSTALL] FINISHED WITH CODE {proc.returncode} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            logs.append(f"[INSTALL] FINISHED WITH CODE {proc.returncode}")
         except Exception as e:
             logs.append(f"[INSTALL-ERROR] {e}")
     
@@ -371,6 +255,293 @@ def run_install(username, command):
 
 def get_install_logs(username):
     return list(INSTALL_LOGS.get(username, []))
+
+# ============================================
+#  ROUTES
+# ============================================
+@app.route("/")
+def home():
+    if is_owner():
+        return redirect(url_for("owner_dashboard"))
+    if current_user():
+        return redirect(url_for("user_dashboard"))
+    return render_template_string(HTML_LANDING, pricing=load_pricing())
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = None
+    if request.method == "POST":
+        username = request.form.get("username", "").strip().upper()
+        password = request.form.get("password", "")
+        
+        if username == OWNER_USER and password == OWNER_PASS:
+            session.clear()
+            session["role"] = "owner"
+            session["username"] = username
+            return redirect(url_for("owner_dashboard"))
+        
+        users = load_users()
+        if username in users and users[username]["password"] == password:
+            if users[username].get("expires_at") and time.time() > users[username]["expires_at"]:
+                error = "ACCOUNT EXPIRED"
+            else:
+                session.clear()
+                session["role"] = "user"
+                session["username"] = username
+                return redirect(url_for("user_dashboard"))
+        else:
+            error = "INVALID CREDENTIALS"
+    
+    return render_template_string(HTML_LOGIN, error=error)
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("home"))
+
+@app.route("/auto/<token>")
+def auto_login(token):
+    users = load_users()
+    for username, info in users.items():
+        if info.get("token") == token:
+            if info.get("expires_at") and time.time() > info["expires_at"]:
+                return "ACCOUNT EXPIRED", 403
+            session.clear()
+            session["role"] = "user"
+            session["username"] = username
+            return redirect(url_for("user_dashboard"))
+    return "INVALID LINK", 404
+
+@app.route("/download/<filename>")
+@require_user
+def download_file(filename):
+    username = current_user()
+    filename = secure_filename(filename)
+    udir = user_dir(username)
+    fpath = udir / filename
+    if fpath.exists() and fpath.is_file():
+        return send_file(fpath, as_attachment=True, download_name=filename)
+    return "FILE NOT FOUND", 404
+
+# ============================================
+#  OWNER ROUTES
+# ============================================
+@app.route("/owner")
+@require_owner
+def owner_dashboard():
+    users = load_users()
+    pricing = load_pricing()
+    now = time.time()
+    changed = False
+    for username in list(users.keys()):
+        if users[username].get("expires_at") and now > users[username]["expires_at"]:
+            del users[username]
+            stop_process(username)
+            changed = True
+    if changed:
+        save_users(users)
+    
+    return render_template_string(
+        HTML_OWNER,
+        users=users,
+        pricing=pricing,
+        now=now,
+        base_url=request.host_url.rstrip("/"),
+        time=time
+    )
+
+@app.route("/owner/create", methods=["POST"])
+@require_owner
+def owner_create():
+    username = request.form.get("username", "").strip().upper()
+    password = request.form.get("password", "").strip()
+    try:
+        days = float(request.form.get("days", "7"))
+    except:
+        days = 7
+    
+    if not username or not password or username == OWNER_USER:
+        return redirect(url_for("owner_dashboard"))
+    
+    users = load_users()
+    users[username] = {
+        "password": password,
+        "created_at": time.time(),
+        "expires_at": time.time() + days * 86400 if days > 0 else 0,
+        "token": secrets.token_urlsafe(16)
+    }
+    save_users(users)
+    user_dir(username)
+    return redirect(url_for("owner_dashboard"))
+
+@app.route("/owner/delete/<username>", methods=["POST"])
+@require_owner
+def owner_delete(username):
+    users = load_users()
+    if username in users:
+        stop_process(username)
+        del users[username]
+        save_users(users)
+        shutil.rmtree(FILES_ROOT / username, ignore_errors=True)
+    return redirect(url_for("owner_dashboard"))
+
+@app.route("/owner/extend/<username>", methods=["POST"])
+@require_owner
+def owner_extend(username):
+    try:
+        days = float(request.form.get("days", "7"))
+    except:
+        days = 7
+    
+    users = load_users()
+    if username in users:
+        base = max(users[username].get("expires_at") or time.time(), time.time())
+        users[username]["expires_at"] = base + days * 86400
+        save_users(users)
+    return redirect(url_for("owner_dashboard"))
+
+@app.route("/owner/pricing", methods=["POST"])
+@require_owner
+def owner_pricing():
+    try:
+        pricing = load_pricing()
+        pricing["currency"] = request.form.get("currency", "₹").strip() or "₹"
+        pricing["contact"] = request.form.get("contact", "").strip()
+        plans = []
+        names = request.form.getlist("p_name")
+        durs = request.form.getlist("p_duration")
+        prices = request.form.getlist("p_price")
+        feats = request.form.getlist("p_features")
+        for i in range(len(names)):
+            if not names[i].strip():
+                continue
+            plans.append({
+                "name": names[i].strip().upper(),
+                "duration": durs[i].strip().upper() if i < len(durs) else "",
+                "price": prices[i].strip() if i < len(prices) else "0",
+                "features": feats[i].strip() if i < len(feats) else "",
+            })
+        pricing["plans"] = plans
+        save_pricing(pricing)
+        return redirect(url_for("owner_dashboard"))
+    except Exception as e:
+        return f"ERROR: {e}", 500
+
+# ============================================
+#  USER ROUTES
+# ============================================
+@app.route("/dashboard")
+@require_user
+def user_dashboard():
+    username = current_user()
+    users = load_users()
+    info = users.get(username, {})
+    udir = user_dir(username)
+    files = sorted([f.name for f in udir.iterdir() if f.is_file()])
+    pricing = load_pricing()
+    
+    return render_template_string(
+        HTML_USER,
+        username=username,
+        info=info,
+        files=files,
+        running=is_running(username),
+        running_file=PROCS.get(username, {}).get("file") if is_running(username) else None,
+        expires_at=info.get("expires_at", 0),
+        now=time.time(),
+        pricing=pricing
+    )
+
+@app.route("/upload", methods=["POST"])
+@require_user
+def upload():
+    username = current_user()
+    udir = user_dir(username)
+    files = request.files.getlist("files")
+    
+    for f in files:
+        if f and f.filename:
+            name = secure_filename(f.filename)
+            if name:
+                f.save(udir / name)
+    
+    return redirect(url_for("user_dashboard"))
+
+@app.route("/file/delete/<name>", methods=["POST"])
+@require_user
+def file_delete(name):
+    username = current_user()
+    name = secure_filename(name)
+    p = user_dir(username) / name
+    if p.exists() and p.is_file():
+        p.unlink()
+    return redirect(url_for("user_dashboard"))
+
+@app.route("/file/view/<name>")
+@require_user
+def file_view(name):
+    username = current_user()
+    name = secure_filename(name)
+    return send_from_directory(user_dir(username), name, as_attachment=False)
+
+@app.route("/server/start", methods=["POST"])
+@require_user
+def server_start():
+    username = current_user()
+    filename = secure_filename(request.form.get("file", ""))
+    ok, msg = start_process(username, filename)
+    return jsonify({"ok": ok, "msg": msg})
+
+@app.route("/server/stop", methods=["POST"])
+@require_user
+def server_stop():
+    username = current_user()
+    stop_process(username)
+    return jsonify({"ok": True})
+
+@app.route("/server/restart", methods=["POST"])
+@require_user
+def server_restart():
+    username = current_user()
+    info = PROCS.get(username)
+    filename = info["file"] if info else secure_filename(request.form.get("file", ""))
+    if not filename:
+        return jsonify({"ok": False, "msg": "NO FILE"})
+    stop_process(username)
+    time.sleep(0.3)
+    ok, msg = start_process(username, filename)
+    return jsonify({"ok": ok, "msg": msg})
+
+@app.route("/server/delete", methods=["POST"])
+@require_user
+def server_delete():
+    username = current_user()
+    stop_process(username)
+    PROCS.pop(username, None)
+    return jsonify({"ok": True})
+
+@app.route("/logs")
+@require_user
+def logs_api():
+    username = current_user()
+    return jsonify({
+        "running": is_running(username),
+        "file": PROCS.get(username, {}).get("file"),
+        "logs": get_logs(username),
+        "install": get_install_logs(username)
+    })
+
+@app.route("/install", methods=["POST"])
+@require_user
+def install():
+    username = current_user()
+    cmd = request.form.get("command", "").strip()
+    ok, msg = run_install(username, cmd)
+    return jsonify({"ok": ok, "msg": msg})
+
+@app.route("/healthz")
+def health():
+    return "OK"
 
 # ============================================
 #  HTML TEMPLATES - PREMIUM RED THEME
@@ -615,6 +786,7 @@ tr:hover td{background:rgba(255,23,68,0.02)}
 <div class="nav-actions"><a href="/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> LOGOUT</a></div>
 </nav>
 <div class="wrap">
+<!-- CREATE USER - CENTER -->
 <div class="card">
 <div class="card-header" style="justify-content:center"><i class="fas fa-user-plus"></i> CREATE USER</div>
 <form method="POST" action="/owner/create" class="form-row">
@@ -624,7 +796,10 @@ tr:hover td{background:rgba(255,23,68,0.02)}
 <button type="submit" class="btn btn-primary"><i class="fas fa-plus"></i> CREATE</button>
 </form>
 </div>
+
+<!-- USERS + PRICING ROW -->
 <div class="row2">
+<!-- USERS TABLE -->
 <div class="card" style="overflow:visible">
 <div class="card-header"><i class="fas fa-users"></i> USERS <span class="badge-count">({{ users|length }})</span></div>
 <div class="table-wrap" style="max-height:400px;overflow-y:auto">
@@ -663,6 +838,8 @@ tr:hover td{background:rgba(255,23,68,0.02)}
 </table>
 </div>
 </div>
+
+<!-- PRICING MANAGEMENT -->
 <div class="card">
 <div class="card-header"><i class="fas fa-tags"></i> PRICING</div>
 <form method="POST" action="/owner/pricing">
@@ -883,364 +1060,14 @@ window.addEventListener('resize',()=>{resize();init()});resize();init();loop();
 </html>"""
 
 # ============================================
-#  ROUTES
-# ============================================
-@app.route("/")
-def home():
-    if is_owner():
-        return redirect(url_for("owner_dashboard"))
-    if current_user():
-        return redirect(url_for("user_dashboard"))
-    return render_template_string(HTML_LANDING, pricing=load_pricing())
-
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    error = None
-    if request.method == "POST":
-        username = request.form.get("username", "").strip().upper()
-        password = request.form.get("password", "")
-        
-        if username == OWNER_USER and password == OWNER_PASS:
-            session.clear()
-            session["role"] = "owner"
-            session["username"] = username
-            return redirect(url_for("owner_dashboard"))
-        
-        users = load_users()
-        if username in users and users[username]["password"] == password:
-            if users[username].get("expires_at") and time.time() > users[username]["expires_at"]:
-                error = "ACCOUNT EXPIRED"
-            else:
-                session.clear()
-                session["role"] = "user"
-                session["username"] = username
-                state = load_process_state()
-                if username in state:
-                    filename = state[username].get("file")
-                    if filename:
-                        start_process(username, filename)
-                return redirect(url_for("user_dashboard"))
-        else:
-            error = "INVALID CREDENTIALS"
-    
-    return render_template_string(HTML_LOGIN, error=error)
-
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("home"))
-
-@app.route("/auto/<token>")
-def auto_login(token):
-    users = load_users()
-    for username, info in users.items():
-        if info.get("token") == token:
-            if info.get("expires_at") and time.time() > info["expires_at"]:
-                return "ACCOUNT EXPIRED", 403
-            session.clear()
-            session["role"] = "user"
-            session["username"] = username
-            state = load_process_state()
-            if username in state:
-                filename = state[username].get("file")
-                if filename:
-                    start_process(username, filename)
-            return redirect(url_for("user_dashboard"))
-    return "INVALID LINK", 404
-
-@app.route("/download/<filename>")
-@require_user
-def download_file(filename):
-    username = current_user()
-    filename = secure_filename(filename)
-    udir = user_dir(username)
-    fpath = udir / filename
-    if fpath.exists() and fpath.is_file():
-        return send_file(fpath, as_attachment=True, download_name=filename)
-    return "FILE NOT FOUND", 404
-
-# ============================================
-#  OWNER ROUTES
-# ============================================
-@app.route("/owner")
-@require_owner
-def owner_dashboard():
-    users = load_users()
-    pricing = load_pricing()
-    now = time.time()
-    
-    for username in list(users.keys()):
-        if users[username].get("expires_at") and now > users[username]["expires_at"]:
-            if username in PROCS:
-                stop_process(username)
-    
-    return render_template_string(
-        HTML_OWNER,
-        users=users,
-        pricing=pricing,
-        now=now,
-        base_url=request.host_url.rstrip("/"),
-        time=time
-    )
-
-@app.route("/owner/create", methods=["POST"])
-@require_owner
-def owner_create():
-    username = request.form.get("username", "").strip().upper()
-    password = request.form.get("password", "").strip()
-    try:
-        days = float(request.form.get("days", "7"))
-    except:
-        days = 7
-    
-    if not username or not password or username == OWNER_USER:
-        return redirect(url_for("owner_dashboard"))
-    
-    users = load_users()
-    users[username] = {
-        "password": password,
-        "created_at": time.time(),
-        "expires_at": time.time() + days * 86400 if days > 0 else 0,
-        "token": secrets.token_urlsafe(16)
-    }
-    save_users(users)
-    user_dir(username)
-    return redirect(url_for("owner_dashboard"))
-
-@app.route("/owner/delete/<username>", methods=["POST"])
-@require_owner
-def owner_delete(username):
-    users = load_users()
-    if username in users:
-        stop_process(username)
-        del users[username]
-        save_users(users)
-        shutil.rmtree(FILES_ROOT / username, ignore_errors=True)
-        clear_process_state_for_user(username)
-    return redirect(url_for("owner_dashboard"))
-
-@app.route("/owner/extend/<username>", methods=["POST"])
-@require_owner
-def owner_extend(username):
-    try:
-        days = float(request.form.get("days", "7"))
-    except:
-        days = 7
-    
-    users = load_users()
-    if username in users:
-        base = max(users[username].get("expires_at") or time.time(), time.time())
-        users[username]["expires_at"] = base + days * 86400
-        save_users(users)
-    return redirect(url_for("owner_dashboard"))
-
-@app.route("/owner/pricing", methods=["POST"])
-@require_owner
-def owner_pricing():
-    try:
-        pricing = load_pricing()
-        pricing["currency"] = request.form.get("currency", "₹").strip() or "₹"
-        pricing["contact"] = request.form.get("contact", "").strip()
-        plans = []
-        names = request.form.getlist("p_name")
-        durs = request.form.getlist("p_duration")
-        prices = request.form.getlist("p_price")
-        feats = request.form.getlist("p_features")
-        for i in range(len(names)):
-            if not names[i].strip():
-                continue
-            plans.append({
-                "name": names[i].strip().upper(),
-                "duration": durs[i].strip().upper() if i < len(durs) else "",
-                "price": prices[i].strip() if i < len(prices) else "0",
-                "features": feats[i].strip() if i < len(feats) else "",
-            })
-        pricing["plans"] = plans
-        save_pricing(pricing)
-        return redirect(url_for("owner_dashboard"))
-    except Exception as e:
-        return f"ERROR: {e}", 500
-
-# ============================================
-#  USER ROUTES
-# ============================================
-@app.route("/dashboard")
-@require_user
-def user_dashboard():
-    username = current_user()
-    users = load_users()
-    info = users.get(username, {})
-    udir = user_dir(username)
-    files = sorted([f.name for f in udir.iterdir() if f.is_file()])
-    pricing = load_pricing()
-    
-    state = load_process_state()
-    if username in state and username not in PROCS:
-        filename = state[username].get("file")
-        if filename:
-            if (udir / filename).exists():
-                start_process(username, filename)
-    
-    return render_template_string(
-        HTML_USER,
-        username=username,
-        info=info,
-        files=files,
-        running=is_running(username),
-        running_file=get_running_file(username),
-        expires_at=info.get("expires_at", 0),
-        now=time.time(),
-        pricing=pricing
-    )
-
-@app.route("/upload", methods=["POST"])
-@require_user
-def upload():
-    username = current_user()
-    udir = user_dir(username)
-    files = request.files.getlist("files")
-    
-    for f in files:
-        if f and f.filename:
-            name = secure_filename(f.filename)
-            if name:
-                fpath = udir / name
-                if fpath.exists():
-                    base, ext = os.path.splitext(name)
-                    new_name = f"{base}_{int(time.time())}{ext}"
-                    fpath = udir / new_name
-                f.save(fpath)
-    
-    return redirect(url_for("user_dashboard"))
-
-@app.route("/file/delete/<name>", methods=["POST"])
-@require_user
-def file_delete(name):
-    username = current_user()
-    name = secure_filename(name)
-    p = user_dir(username) / name
-    
-    if is_running(username) and get_running_file(username) == name:
-        return "Cannot delete running file. Stop the process first.", 400
-    
-    if p.exists() and p.is_file():
-        p.unlink()
-    return redirect(url_for("user_dashboard"))
-
-@app.route("/file/view/<name>")
-@require_user
-def file_view(name):
-    username = current_user()
-    name = secure_filename(name)
-    return send_from_directory(user_dir(username), name, as_attachment=False)
-
-@app.route("/server/start", methods=["POST"])
-@require_user
-def server_start():
-    username = current_user()
-    filename = secure_filename(request.form.get("file", ""))
-    
-    udir = user_dir(username)
-    if not (udir / filename).exists():
-        return jsonify({"ok": False, "msg": "FILE DOES NOT EXIST"})
-    
-    ok, msg = start_process(username, filename)
-    return jsonify({"ok": ok, "msg": msg})
-
-@app.route("/server/stop", methods=["POST"])
-@require_user
-def server_stop():
-    username = current_user()
-    stop_process(username)
-    return jsonify({"ok": True, "msg": "PROCESS STOPPED"})
-
-@app.route("/server/restart", methods=["POST"])
-@require_user
-def server_restart():
-    username = current_user()
-    info = PROCS.get(username)
-    filename = info["file"] if info else secure_filename(request.form.get("file", ""))
-    if not filename:
-        state = load_process_state()
-        if username in state:
-            filename = state[username].get("file")
-    if not filename:
-        return jsonify({"ok": False, "msg": "NO FILE TO RESTART"})
-    
-    udir = user_dir(username)
-    if not (udir / filename).exists():
-        return jsonify({"ok": False, "msg": "FILE NO LONGER EXISTS"})
-    
-    stop_process(username)
-    time.sleep(0.5)
-    ok, msg = start_process(username, filename)
-    return jsonify({"ok": ok, "msg": msg})
-
-@app.route("/server/delete", methods=["POST"])
-@require_user
-def server_delete():
-    username = current_user()
-    stop_process(username)
-    PROCS.pop(username, None)
-    clear_process_state_for_user(username)
-    return jsonify({"ok": True, "msg": "PROCESS DELETED"})
-
-@app.route("/logs")
-@require_user
-def logs_api():
-    username = current_user()
-    return jsonify({
-        "running": is_running(username),
-        "file": get_running_file(username),
-        "logs": get_logs(username),
-        "install": get_install_logs(username)
-    })
-
-@app.route("/install", methods=["POST"])
-@require_user
-def install():
-    username = current_user()
-    cmd = request.form.get("command", "").strip()
-    ok, msg = run_install(username, cmd)
-    return jsonify({"ok": ok, "msg": msg})
-
-@app.route("/healthz")
-def health():
-    return "OK"
-
-# ============================================
 #  MAIN
 # ============================================
 if __name__ == "__main__":
     print("\n" + "="*70)
-    print("🚀 NEXUS VPS PANEL - ULTRA PREMIUM EDITION (STABLE)")
+    print("🚀 NEXUS VPS PANEL - ULTRA PREMIUM EDITION")
     print("="*70)
     print(f"📍 LOCAL:  http://127.0.0.1:5000")
     print(f"📍 NETWORK: http://0.0.0.0:5000")
     print(f"👤 OWNER:  {OWNER_USER} / {OWNER_PASS}")
-    print("="*70)
-    print("✅ FIXES & FEATURES:")
-    print("   ✓ Files are NEVER automatically deleted")
-    print("   ✓ Persistent process state (auto-restart on crash)")
-    print("   ✓ Process monitor running in background")
-    print("   ✓ Duplicate files get renamed (not overwritten)")
-    print("   ✓ Cannot delete running files")
-    print("   ✓ Auto-restore processes on login")
     print("="*70 + "\n")
-    
-    start_monitor()
-    
-    state = load_process_state()
-    users = load_users()
-    for username, info in state.items():
-        if username in users:
-            expires_at = users[username].get("expires_at")
-            if not expires_at or time.time() < expires_at:
-                filename = info.get("file")
-                if filename:
-                    udir = user_dir(username)
-                    if (udir / filename).exists():
-                        print(f"🔄 Restoring process for {username}: {filename}")
-                        start_process(username, filename)
-    
     app.run(host="0.0.0.0", port=5000, debug=True, threaded=True)
